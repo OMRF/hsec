@@ -149,11 +149,63 @@ hsec run --name aws -- terraform apply
 If no agent is running, `hsec run` puts a passphrase dialog on your desktop
 naming the secret and the requesting command, then times out.
 
+### Track when a credential expires
+
+Bearer tokens usually expire, and an expired one surfaces as a confusing `401`
+from the far end rather than an obvious error. `hsec` records an optional
+expiry per secret and warns before you hit that.
+
+If the secret is a JWT, enrollment reads the `exp` claim automatically:
+
+```console
+$ hsec add awn-key --env AWN_API_KEY
+...
+detected JWT expiry: 2027-08-27T03:37:28+00:00
+```
+
+Otherwise set it yourself, or attach one to a secret enrolled earlier:
+
+```console
+hsec add gh-token --env GITHUB_TOKEN --expires 2027-01-15
+hsec expiry gh-token --set 2027-01-15
+hsec expiry awn-key --detect     # read the exp claim (needs one unlock)
+hsec expiry awn-key --clear
+```
+
+`hsec list` then shows the remaining life, flagging anything expired or inside
+the warning window:
+
+```
+NAME       ENV VAR       EXPIRES               DESCRIPTION
+awn-key    AWN_API_KEY   2027-08-27 (363d)     Arctic Wolf PAK
+gh-token   GITHUB_TOKEN  2026-09-10 (13d LEFT) GitHub PAT
+old-key    LEGACY_TOKEN  2026-01-01 (EXPIRED)  retire me
+```
+
+and `hsec run` warns on **stderr** before running, so the warning never
+pollutes the command's stdout:
+
+```
+hsec: WARNING old-key expired 240 days ago (2026-01-01)
+```
+
+The window defaults to 30 days; set `expiry_warn_days` in `config.json` to
+change it.
+
+Only the `exp` claim is read from a JWT — no other claim is decoded, logged, or
+displayed, so recording an expiry never widens what anyone learns about the
+secret. Expiry lives in `manifest.json` and is therefore **not** authenticated,
+unlike the sealed blob headers. That is deliberate: it is a reminder, not an
+enforcement mechanism, and anyone able to forge it could equally delete the
+store. `hsec` never refuses to run on an expired secret; it tells you and
+proceeds.
+
 ### Everything else
 
 | Command | Purpose |
 |---|---|
-| `hsec list` | names and env vars, never values |
+| `hsec list` | names, env vars, and expiry — never values |
+| `hsec expiry <name>` | show, `--set`, `--clear`, or `--detect` an expiry |
 | `hsec rm <name>` | remove a sealed secret |
 | `hsec log -n 50` | audit trail |
 | `hsec backup [dir]` | copy the store to a second location |

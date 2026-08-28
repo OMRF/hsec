@@ -17,8 +17,25 @@ import sys
 
 
 def have_tty() -> bool:
+    """True only when there is a real interactive terminal on *both* ends.
+
+    Checking stdin alone is not enough. A shell can hand a process a pty-like
+    stdin while stdout is redirected to a file or a pipe — which is exactly
+    what happens under an agent tool call or a backgrounded command. In that
+    case `getpass()` looks available but, on Windows, reads the console
+    directly via msvcrt and blocks forever with no timeout.
+
+    The GUI prompt always times out, so when the terminal is anything less
+    than unambiguous, prefer it. A hang with no way out is a worse failure
+    than an unexpected dialog.
+    """
     try:
-        return sys.stdin is not None and sys.stdin.isatty()
+        return bool(
+            sys.stdin is not None
+            and sys.stdout is not None
+            and sys.stdin.isatty()
+            and sys.stdout.isatty()
+        )
     except Exception:
         return False
 

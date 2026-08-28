@@ -155,6 +155,77 @@ def validate_env(var: str) -> str:
     return var
 
 
+# --- expiry metadata ------------------------------------------------------------
+#
+# Expiry lives in the manifest, not in the sealed blob header, and is therefore
+# NOT authenticated. That is deliberate: it is operational metadata, not a
+# security control. Anyone who could forge it could equally delete the store.
+# Treat it as a reminder, never as enforcement.
+
+DEFAULT_EXPIRY_WARN_DAYS = 30
+
+
+def parse_expiry(text: str) -> str:
+    """Accept YYYY-MM-DD or a full ISO 8601 timestamp; return normalized UTC."""
+    try:
+        dt = datetime.fromisoformat(text.strip())
+    except ValueError:
+        raise StoreError(
+            f"cannot parse date {text!r}: use YYYY-MM-DD or an ISO 8601 timestamp"
+        ) from None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+
+def days_until(iso: str) -> float | None:
+    try:
+        dt = datetime.fromisoformat(iso)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return (dt - datetime.now(timezone.utc)).total_seconds() / 86400
+
+
+def expiry_label(iso: str | None, warn_days: int = DEFAULT_EXPIRY_WARN_DAYS) -> str:
+    """Short column text for `hsec list`."""
+    if not iso:
+        return "-"
+    days = days_until(iso)
+    date = iso[:10]
+    if days is None:
+        return f"{date} (?)"
+    if days < 0:
+        return f"{date} (EXPIRED)"
+    if days <= warn_days:
+        return f"{date} ({days:.0f}d LEFT)"
+    return f"{date} ({days:.0f}d)"
+
+
+def jwt_expiry(value: bytes) -> str | None:
+    """If `value` is a JWT carrying an `exp` claim, return it as ISO 8601 UTC.
+
+    Only the timestamp is returned. No other claim is read out, logged, or
+    surfaced, so detecting an expiry never widens what a caller learns about
+    the secret. Returns None for an opaque token or a JWT without `exp`.
+    """
+    parts = value.split(b".")
+    if len(parts) != 3:
+        return None
+    try:
+        seg = parts[1] + b"=" * (-len(parts[1]) % 4)
+        exp = json.loads(base64.urlsafe_b64decode(seg)).get("exp")
+    except Exception:
+        return None
+    if not isinstance(exp, (int, float)) or isinstance(exp, bool):
+        return None
+    try:
+        return datetime.fromtimestamp(exp, timezone.utc).isoformat(timespec="seconds")
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
 # --- key derivation -------------------------------------------------------------
 
 

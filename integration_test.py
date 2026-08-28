@@ -165,6 +165,76 @@ def main() -> int:
               '"event": "unseal"' in log and SENTINEL not in log,
               f"{len(log.splitlines())} entries")
 
+        # 12a. expiry metadata: set, show, warn, clear
+        r = run_hsec(env, "expiry", "probe", "--set", "2099-01-01")
+        check("expiry --set records a date",
+              r.returncode == 0 and b"2099-01-01" in r.stdout, dec(r.stdout).strip())
+
+        r = run_hsec(env, "list")
+        check("list shows an EXPIRES column",
+              b"EXPIRES" in r.stdout and b"2099-01-01" in r.stdout)
+
+        r = run_hsec(env, "expiry", "probe", "--set", "2000-01-01")
+        r = run_hsec(env, "list")
+        check("list flags an expired secret", b"EXPIRED" in r.stdout,
+              dec(r.stdout).strip().splitlines()[-1][:70])
+
+        r = run_hsec(env, "run", "--name", "probe", "--",
+                     sys.executable, "-c", "print('ran')")
+        check("run warns on stderr about an expired secret, still runs",
+              r.returncode == 0 and b"ran" in r.stdout
+              and b"expired" in r.stderr.lower(),
+              dec(r.stderr).strip()[:70])
+
+        r = run_hsec(env, "expiry", "probe", "--clear")
+        r2 = run_hsec(env, "list")
+        check("expiry --clear removes the date",
+              r.returncode == 0 and b"EXPIRED" not in r2.stdout)
+
+        r = run_hsec(env, "expiry", "probe", "--set", "not-a-date")
+        check("expiry rejects an unparsable date", r.returncode != 0,
+              dec(r.stderr).strip()[:60])
+
+        # 12b. JWT exp detection, parsed locally without exposing other claims
+        import base64 as _b64
+
+        def _seg(obj):
+            return _b64.urlsafe_b64encode(
+                json.dumps(obj).encode()).rstrip(b"=").decode()
+
+        jwt = ".".join([
+            _seg({"alg": "PS256", "typ": "JWT"}),
+            _seg({"exp": 4102444800, "sub": "secret-subject-do-not-leak"}),
+            "c2lnbmF0dXJl",
+        ])
+        check("jwt_expiry reads exp and ignores other claims",
+              store.jwt_expiry(jwt.encode()) == "2100-01-01T00:00:00+00:00",
+              str(store.jwt_expiry(jwt.encode())))
+        check("jwt_expiry returns None for an opaque token",
+              store.jwt_expiry(b"not-a-jwt-at-all") is None)
+        check("jwt_expiry returns None for a JWT without exp",
+              store.jwt_expiry(
+                  ".".join([_seg({"alg": "none"}), _seg({"sub": "x"}), "sig"]).encode()
+              ) is None)
+
+        # 12c. the --detect CLI path: seal a JWT, let hsec read its own expiry
+        (store.BLOB_DIR / "jwtprobe.json").write_text(
+            json.dumps(store.seal("jwtprobe", jwt.encode(), pass_key, cfg)), "utf-8")
+        man = store.load_manifest()
+        man["jwtprobe"] = {"env": "JWT_PROBE", "description": "jwt"}
+        store.save_manifest(man)
+
+        r = run_hsec(env, "expiry", "jwtprobe", "--detect")
+        check("expiry --detect reads exp from the sealed JWT",
+              r.returncode == 0 and b"2100-01-01" in r.stdout, dec(r.stdout).strip())
+        check("--detect leaks no other claim into output",
+              b"secret-subject-do-not-leak" not in r.stdout + r.stderr)
+
+        r = run_hsec(env, "expiry", "probe", "--detect")
+        check("--detect fails cleanly on a non-JWT secret",
+              r.returncode != 0 and b"not a JWT" in r.stderr,
+              dec(r.stderr).strip()[:60])
+
         # 11. stopping the agent forces the next run to need a passphrase again
         r = run_hsec(env, "agent", "stop")
         time.sleep(0.5)

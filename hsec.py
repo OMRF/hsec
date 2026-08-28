@@ -14,6 +14,7 @@ representation of it out of the child's output before returning.
     hsec list                                  names and env vars, never values
     hsec rm <name>                             remove a sealed secret
     hsec run --name a,b -- <command>           run a command with secrets injected
+    hsec expiry <name> --set|--clear|--detect  track when a credential expires
     hsec agent start|status|stop               session agent (prompt once)
     hsec verify                                self-test the security properties
     hsec backup [dir]                          copy the store out of the repo
@@ -214,7 +215,17 @@ def cmd_add(args) -> int:
     store.blob_path(name).write_text(
         json.dumps(header, indent=2, sort_keys=True) + "\n", "utf-8"
     )
-    man[name] = {"env": env_var, "description": args.description or ""}
+    entry = {"env": env_var, "description": args.description or ""}
+    if args.expires:
+        entry["expires"] = store.parse_expiry(args.expires)
+    elif not args.no_detect_expiry:
+        # A bearer token that carries its own expiry should not need the user
+        # to retype it. Only the exp claim is read.
+        detected = store.jwt_expiry(value.encode("utf-8"))
+        if detected:
+            entry["expires"] = detected
+            print(f"detected JWT expiry: {detected}")
+    man[name] = entry
     store.save_manifest(man)
     _harden_acl(store.STORE_DIR)
     store.audit("add", name=name, env=env_var)
@@ -232,16 +243,75 @@ def cmd_list(args) -> int:
     if not man:
         print("no secrets enrolled. Add one with: hsec add <name> --env VAR")
         return 0
+    cfg = store.load_config()
+    warn_days = int(cfg.get("expiry_warn_days", store.DEFAULT_EXPIRY_WARN_DAYS))
     width = max(len(n) for n in man)
-    print(f"{'NAME'.ljust(width)}  {'ENV VAR'.ljust(24)}  DESCRIPTION")
+    labels = {
+        n: store.expiry_label(man[n].get("expires"), warn_days) for n in man
+    }
+    ewidth = max(len("EXPIRES"), max(len(v) for v in labels.values()))
+    print(
+        f"{'NAME'.ljust(width)}  {'ENV VAR'.ljust(24)}  "
+        f"{'EXPIRES'.ljust(ewidth)}  DESCRIPTION"
+    )
     for name in sorted(man):
         entry = man[name]
-        exists = store.blob_path(name).exists()
-        flag = "" if exists else "  [BLOB MISSING]"
+        flag = "" if store.blob_path(name).exists() else "  [BLOB MISSING]"
         print(
             f"{name.ljust(width)}  {entry['env'].ljust(24)}  "
-            f"{entry.get('description', '')}{flag}"
+            f"{labels[name].ljust(ewidth)}  {entry.get('description', '')}{flag}"
         )
+    return 0
+
+
+def cmd_expiry(args) -> int:
+    """Set, clear, or auto-detect the expiry recorded for a secret."""
+    cfg = store.load_config()
+    man = store.load_manifest()
+    name = store.validate_name(args.name)
+    if name not in man:
+        return err(f"unknown secret {name!r}. Run: hsec list")
+
+    if args.clear:
+        man[name].pop("expires", None)
+        store.save_manifest(man)
+        store.audit("expiry_clear", name=name)
+        print(f"cleared expiry for {name!r}")
+        return 0
+
+    if args.set:
+        man[name]["expires"] = store.parse_expiry(args.set)
+    elif args.detect:
+        # Unsealing is required to read the exp claim, so this costs one
+        # unlock. Only the timestamp is extracted.
+        secret = agent.unseal_via_agent(name)
+        if secret is None:
+            pass_key = ask_pass_key(
+                cfg, f"Detect the expiry recorded inside '{name}'"
+            )
+            if pass_key is None:
+                return err("unlock canceled or wrong passphrase")
+            secret = store.unseal(store.load_blob(name), pass_key)
+        try:
+            detected = store.jwt_expiry(bytes(secret))
+        finally:
+            store.zero(secret)
+        if not detected:
+            return err(
+                f"{name!r} is not a JWT with an exp claim; set one explicitly "
+                f"with: hsec expiry {name} --set YYYY-MM-DD"
+            )
+        man[name]["expires"] = detected
+        print(f"detected: {detected}")
+    else:
+        current = man[name].get("expires")
+        print(store.expiry_label(current, int(
+            cfg.get("expiry_warn_days", store.DEFAULT_EXPIRY_WARN_DAYS))))
+        return 0
+
+    store.save_manifest(man)
+    store.audit("expiry_set", name=name, expires=man[name]["expires"])
+    print(f"{name}: expires {man[name]['expires']}")
     return 0
 
 
@@ -294,6 +364,24 @@ def cmd_run(args) -> int:
     for n in names:
         if n not in man:
             return err(f"unknown secret {n!r}. Run: hsec list")
+
+    # Warn before running, not after: an expired credential usually surfaces as
+    # a confusing 401 from the far end, and this turns that into one line that
+    # names the cause. Warnings go to stderr so they never pollute stdout.
+    warn_days = int(cfg.get("expiry_warn_days", store.DEFAULT_EXPIRY_WARN_DAYS))
+    for n in names:
+        iso = man[n].get("expires")
+        if not iso:
+            continue
+        days = store.days_until(iso)
+        if days is None:
+            continue
+        if days < 0:
+            print(f"hsec: WARNING {n} expired {abs(days):.0f} days ago ({iso[:10]})",
+                  file=sys.stderr)
+        elif days <= warn_days:
+            print(f"hsec: note {n} expires in {days:.0f} days ({iso[:10]})",
+                  file=sys.stderr)
 
     secrets: dict[str, bytearray] = {}
     pass_key: bytes | None = None
@@ -566,6 +654,9 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--env", required=True, help="environment variable to inject as")
     a.add_argument("--description", default="")
     a.add_argument("--force", action="store_true", help="replace an existing secret")
+    a.add_argument("--expires", help="expiry date: YYYY-MM-DD or ISO 8601 timestamp")
+    a.add_argument("--no-detect-expiry", action="store_true",
+                   help="do not read an expiry from a JWT automatically")
 
     sub.add_parser("list", help="list secret names and env vars")
 
@@ -578,6 +669,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     ag = sub.add_parser("agent", help="session agent")
     ag.add_argument("action", choices=["start", "status", "stop", "serve"])
+
+    ex = sub.add_parser("expiry", help="show, set, clear, or detect a secret's expiry")
+    ex.add_argument("name")
+    exg = ex.add_mutually_exclusive_group()
+    exg.add_argument("--set", metavar="DATE", help="YYYY-MM-DD or ISO 8601")
+    exg.add_argument("--clear", action="store_true")
+    exg.add_argument("--detect", action="store_true",
+                     help="read the exp claim from a JWT secret (needs unlock)")
 
     sub.add_parser("verify", help="self-test the security properties")
 
@@ -595,6 +694,7 @@ def main() -> int:
     handlers = {
         "init": cmd_init, "add": cmd_add, "list": cmd_list, "rm": cmd_rm,
         "run": cmd_run, "agent": cmd_agent, "verify": cmd_verify,
+        "expiry": cmd_expiry,
         "backup": cmd_backup, "log": cmd_log,
     }
     try:
