@@ -1,0 +1,18 @@
+# The store lives OUTSIDE this repo (../.hsec), so nothing here should ever
+# match it. This entry is belt-and-braces for the case where someone points
+# HSEC_STORE inside the working tree: blobs are TPM-bound and useless off this
+# machine, but they are still ciphertext of live credentials, and the manifest
+# reveals which services are in use.
+.hsec/
+
+# Python / uv
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+
+# Editors, OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
