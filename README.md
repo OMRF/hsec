@@ -282,6 +282,10 @@ mangle unrelated output.
   prevented. The audit log records what was accessed and by which command.
 - The store's ACL protects against other users, not against an administrator
   or anything running as you.
+- Blob size reveals the approximate length of each secret. AES-GCM ciphertext
+  matches its plaintext length and `hsec` does not pad, so anyone able to read
+  the store learns roughly how long a value is — though not the value, and not
+  which service it belongs to beyond what `manifest.json` already says.
 
 To report a security issue, see [SECURITY.md](SECURITY.md). Please do not open
 a public issue for a vulnerability.
