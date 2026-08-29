@@ -14,6 +14,7 @@ representation of it out of the child's output before returning.
     hsec list                                  names and env vars, never values
     hsec rm <name>                             remove a sealed secret
     hsec run --name a,b -- <command>           run a command with secrets injected
+    hsec env <name> <ENV_VAR>                  retarget the injected variable
     hsec expiry <name> --set|--clear|--detect  track when a credential expires
     hsec agent start|status|stop               session agent (prompt once)
     hsec verify                                self-test the security properties
@@ -261,6 +262,29 @@ def cmd_list(args) -> int:
             f"{name.ljust(width)}  {entry['env'].ljust(24)}  "
             f"{labels[name].ljust(ewidth)}  {entry.get('description', '')}{flag}"
         )
+    return 0
+
+
+def cmd_env(args) -> int:
+    """Retarget the environment variable a secret is injected as.
+
+    Pure metadata. The variable name is not in the sealed blob, is not
+    authenticated, and plays no part in key derivation, so this needs neither
+    the passphrase nor a re-seal. Only the name is cryptographically bound.
+    """
+    man = store.load_manifest()
+    name = store.validate_name(args.name)
+    if name not in man:
+        return err(f"unknown secret {name!r}. Run: hsec list")
+    new = store.validate_env(args.env_var)
+    old = man[name].get("env")
+    if old == new:
+        print(f"{name}: already injected as {new}")
+        return 0
+    man[name]["env"] = new
+    store.save_manifest(man)
+    store.audit("env_change", name=name, old=old, new=new)
+    print(f"{name}: {old} -> {new}")
     return 0
 
 
@@ -670,6 +694,10 @@ def build_parser() -> argparse.ArgumentParser:
     ag = sub.add_parser("agent", help="session agent")
     ag.add_argument("action", choices=["start", "status", "stop", "serve"])
 
+    en = sub.add_parser("env", help="change the environment variable a secret injects as")
+    en.add_argument("name")
+    en.add_argument("env_var", metavar="ENV_VAR")
+
     ex = sub.add_parser("expiry", help="show, set, clear, or detect a secret's expiry")
     ex.add_argument("name")
     exg = ex.add_mutually_exclusive_group()
@@ -694,7 +722,7 @@ def main() -> int:
     handlers = {
         "init": cmd_init, "add": cmd_add, "list": cmd_list, "rm": cmd_rm,
         "run": cmd_run, "agent": cmd_agent, "verify": cmd_verify,
-        "expiry": cmd_expiry,
+        "expiry": cmd_expiry, "env": cmd_env,
         "backup": cmd_backup, "log": cmd_log,
     }
     try:

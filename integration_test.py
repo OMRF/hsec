@@ -165,6 +165,34 @@ def main() -> int:
               '"event": "unseal"' in log and SENTINEL not in log,
               f"{len(log.splitlines())} entries")
 
+        # 11a. retargeting the env var is metadata-only: no passphrase, no
+        #      re-seal, and the same sealed blob injects under the new name.
+        r = run_hsec(env, "env", "probe", "RENAMED_TOKEN")
+        check("env retargets the variable",
+              r.returncode == 0 and b"PROBE_TOKEN -> RENAMED_TOKEN" in r.stdout,
+              dec(r.stdout).strip())
+
+        code = ("import os;print('NEW:'+os.environ.get('RENAMED_TOKEN','-')"
+                "+' OLD:'+os.environ.get('PROBE_TOKEN','unset'))")
+        r = run_hsec(env, "run", "--name", "probe", "--", sys.executable, "-c", code)
+        check("run injects under the new variable only",
+              b"NEW:[REDACTED:probe]" in r.stdout and b"OLD:unset" in r.stdout,
+              dec(r.stdout).strip()[:70])
+
+        check("blob was not re-sealed by the retarget",
+              json.loads((store.BLOB_DIR / "probe.json").read_text("utf-8"))["name"]
+              == "probe")
+
+        r = run_hsec(env, "env", "probe", "not a valid var")
+        check("env rejects an invalid variable name", r.returncode != 0,
+              dec(r.stderr).strip()[:60])
+
+        r = run_hsec(env, "env", "nosuchsecret", "SOME_VAR")
+        check("env rejects an unknown secret", r.returncode != 0,
+              dec(r.stderr).strip()[:60])
+
+        run_hsec(env, "env", "probe", "PROBE_TOKEN")  # restore for later checks
+
         # 12a. expiry metadata: set, show, warn, clear
         r = run_hsec(env, "expiry", "probe", "--set", "2099-01-01")
         check("expiry --set records a date",

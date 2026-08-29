@@ -200,12 +200,30 @@ enforcement mechanism, and anyone able to forge it could equally delete the
 store. `hsec` never refuses to run on an expired secret; it tells you and
 proceeds.
 
+### Retarget a secret's variable
+
+The name and the environment variable do different jobs. The **name** is
+cryptographically bound — it feeds the HKDF `info` and is authenticated in the
+blob header, so renaming a secret means re-sealing it. The **variable** is pure
+metadata in `manifest.json`, so it can be changed freely:
+
+```console
+$ hsec env arctic-wolf-api-key AWN_TOKEN
+arctic-wolf-api-key: AWN_API_KEY -> AWN_TOKEN
+```
+
+No passphrase, no re-seal, no agent restart — `hsec run` re-reads the manifest
+each invocation. Keeping the two separate is deliberate: if the variable were
+derived from the name, retargeting it to suit some tool would force a crypto
+operation for a cosmetic change.
+
 ### Everything else
 
 | Command | Purpose |
 |---|---|
 | `hsec list` | names, env vars, and expiry — never values |
 | `hsec expiry <name>` | show, `--set`, `--clear`, or `--detect` an expiry |
+| `hsec env <name> <VAR>` | retarget the variable a secret injects as |
 | `hsec rm <name>` | remove a sealed secret |
 | `hsec log -n 50` | audit trail |
 | `hsec backup [dir]` | copy the store to a second location |
