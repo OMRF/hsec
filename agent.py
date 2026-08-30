@@ -19,9 +19,11 @@ import os
 import sys
 import threading
 import time
+from collections.abc import Callable
 from ctypes import wintypes
 
 import store
+import tray
 
 # --- Win32 -----------------------------------------------------------------------
 
@@ -195,6 +197,25 @@ class Agent:
         self.pass_key = bytearray(pass_key)
         self.expires_at = time.time() + ttl_seconds
         self.running = True
+        # Run just before the process dies, whichever way it dies. The tray
+        # registers its icon teardown here.
+        self.shutdown_hooks: list[Callable[[], None]] = []
+
+    def shutdown(self, reason: str) -> None:
+        """The single exit path: TTL expiry, `hsec agent stop`, and tray Exit
+        all end here.
+
+        os._exit skips atexit, finally and destructors, so anything that must
+        happen on the way out has to happen in the hooks, above the call.
+        """
+        for hook in self.shutdown_hooks:
+            try:
+                hook()
+            except Exception:
+                pass
+        store.zero(self.pass_key)
+        store.audit(reason)
+        os._exit(0)
 
     def handle(self, req: dict) -> dict:
         op = req.get("op")
@@ -250,8 +271,9 @@ class Agent:
                 _k32.FlushFileBuffers(handle)
                 _k32.DisconnectNamedPipe(handle)
                 _k32.CloseHandle(handle)
-        store.zero(self.pass_key)
-        store.audit("agent_stop")
+        # The stop reply has been written and flushed by now, so the client
+        # gets its acknowledgement before we go.
+        self.shutdown("agent_stop")
 
     def _start_watchdog(self) -> None:
         """The serve loop blocks in ConnectNamedPipe, so TTL enforcement lives
@@ -260,9 +282,7 @@ class Agent:
         def tick():
             while self.running:
                 if time.time() >= self.expires_at:
-                    store.zero(self.pass_key)
-                    store.audit("agent_expired")
-                    os._exit(0)
+                    self.shutdown("agent_expired")
                 time.sleep(5)
 
         threading.Thread(target=tick, daemon=True).start()
@@ -325,5 +345,26 @@ def serve_main() -> int:
         print("agent: no key on stdin", file=sys.stderr)
         return 2
     cfg = store.load_config()
-    Agent(store.b64d(raw.decode("ascii")), int(cfg["agent_ttl_seconds"])).serve()
+    ag = Agent(store.b64d(raw.decode("ascii")), int(cfg["agent_ttl_seconds"]))
+
+    # The tray owns the main thread, because a Win32 message pump has to run on
+    # the thread that created the window. When there is no tray -- HSEC_NO_TRAY,
+    # or a shell that refused the icon -- the serve loop keeps the main thread
+    # and the agent behaves exactly as it did before.
+    if not tray.install(ag):
+        ag.serve()
+        return 0
+
+    def serve_guarded() -> None:
+        try:
+            ag.serve()
+        except Exception as exc:
+            # A dead serve loop behind a live icon is the worst of both: the
+            # tray says unlocked and nothing answers the pipe. Take the whole
+            # process down instead of advertising a session that is gone.
+            store.audit("agent_error", error=str(exc))
+            ag.shutdown("agent_stop")
+
+    threading.Thread(target=serve_guarded, daemon=True).start()
+    tray.run()
     return 0

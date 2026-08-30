@@ -54,7 +54,10 @@ def dec(raw: bytes) -> str:
 
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="hsec-itest-"))
-    env = dict(os.environ, HSEC_STORE=str(tmp))
+    # HSEC_NO_TRAY keeps the two agents below headless: a test run should not
+    # put icons in the notification area, and the pipe path is what is under
+    # test either way.
+    env = dict(os.environ, HSEC_STORE=str(tmp), HSEC_NO_TRAY="1")
     agent_proc = None
 
     try:

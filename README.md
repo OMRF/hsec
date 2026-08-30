@@ -136,7 +136,24 @@ agent: started (pid 24601), unlocked for 8h
 
 The agent holds the passphrase-derived key **in memory only** — nothing at rest
 to steal — and serves a named pipe whose DACL grants your SID alone. It exits
-on TTL expiry or `hsec agent stop`.
+on TTL expiry, on `hsec agent stop`, or on **Exit** in its tray menu.
+
+It runs under `pythonw.exe`, so it has no console window. Its only presence on
+the desktop is a shield icon in the notification area:
+
+| | |
+|---|---|
+| hover | how long the session has left |
+| **Show log** | a live-tailing window on the audit trail |
+| **Secrets** | what is enrolled, and the variable each injects as — never a value |
+| **Exit (stop agent)** | zero the key and stop, same as `hsec agent stop` |
+
+Closing the log window does **not** stop the agent. It is a separate process
+precisely so that it cannot: the agent keeps running, and the icon stays put.
+The log view is read-only — there is deliberately no way to clear an audit
+trail from a tray menu.
+
+`hsec log --window` opens the same window without going through the tray.
 
 ### Run commands
 
@@ -226,6 +243,7 @@ operation for a cosmetic change.
 | `hsec env <name> <VAR>` | retarget the variable a secret injects as |
 | `hsec rm <name>` | remove a sealed secret |
 | `hsec log -n 50` | audit trail |
+| `hsec log --window` | audit trail, live, in a window |
 | `hsec backup [dir]` | copy the store to a second location |
 | `hsec verify` | self-test the security properties |
 | `hsec agent status\|stop` | manage the session agent |
