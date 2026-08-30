@@ -242,11 +242,29 @@ def cmd_list(args) -> int:
     # empty store rather than the wrong one.
     store.load_config()
     man = store.load_manifest()
+    cfg = store.load_config()
+    warn_days = int(cfg.get("expiry_warn_days", store.DEFAULT_EXPIRY_WARN_DAYS))
+
+    if getattr(args, "json", False):
+        # Manifest metadata only - the same non-secret fields the table below
+        # prints. Nothing here is unsealed, and no value ever appears.
+        import json as _json
+
+        print(_json.dumps({
+            name: {
+                "env": entry.get("env"),
+                "description": entry.get("description", ""),
+                "expires": entry.get("expires"),
+                "expiry_label": store.expiry_label(entry.get("expires"),
+                                                   warn_days),
+                "blob_present": store.blob_path(name).exists(),
+            } for name, entry in sorted(man.items())
+        }, indent=2))
+        return 0
+
     if not man:
         print("no secrets enrolled. Add one with: hsec add <name> --env VAR")
         return 0
-    cfg = store.load_config()
-    warn_days = int(cfg.get("expiry_warn_days", store.DEFAULT_EXPIRY_WARN_DAYS))
     width = max(len(n) for n in man)
     labels = {
         n: store.expiry_label(man[n].get("expires"), warn_days) for n in man
@@ -456,10 +474,17 @@ def cmd_agent(args) -> int:
 
     if args.action == "status":
         st = agent.status()
+        left = int(st["expires_at"] - time.time()) if st else 0
+        if getattr(args, "json", False):
+            import json as _json
+
+            print(_json.dumps({"running": bool(st),
+                               "expires_at": st["expires_at"] if st else None,
+                               "seconds_left": left if st else 0}, indent=2))
+            return 0 if st else 1
         if not st:
             print("agent: not running")
             return 1
-        left = int(st["expires_at"] - time.time())
         print(f"agent: running, expires in {left // 60}m{left % 60}s")
         return 0
 
@@ -691,7 +716,9 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--no-detect-expiry", action="store_true",
                    help="do not read an expiry from a JWT automatically")
 
-    sub.add_parser("list", help="list secret names and env vars")
+    ls = sub.add_parser("list", help="list secret names and env vars")
+    ls.add_argument("--json", action="store_true",
+                    help="emit manifest metadata as JSON (no secret values)")
 
     r = sub.add_parser("rm", help="remove a sealed secret")
     r.add_argument("name")
@@ -702,6 +729,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     ag = sub.add_parser("agent", help="session agent")
     ag.add_argument("action", choices=["start", "status", "stop", "serve"])
+    ag.add_argument("--json", action="store_true",
+                    help="emit agent status as JSON")
 
     en = sub.add_parser("env", help="change the environment variable a secret injects as")
     en.add_argument("name")
