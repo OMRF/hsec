@@ -19,7 +19,7 @@ representation of it out of the child's output before returning.
     hsec agent start|status|stop               session agent (prompt once)
     hsec verify                                self-test the security properties
     hsec backup [dir]                          copy the store out of the repo
-    hsec log [-n N]                            tail the audit trail
+    hsec log [-n N] [--window]                 tail the audit trail
 """
 
 from __future__ import annotations
@@ -38,6 +38,7 @@ import agent  # noqa: E402
 import prompt  # noqa: E402
 import store  # noqa: E402
 import tpm  # noqa: E402
+import tray  # noqa: E402
 
 VERIFIER_PATH = store.STORE_DIR / "verifier.json"
 VERIFIER_NAME = "verifier"
@@ -475,8 +476,12 @@ def cmd_agent(args) -> int:
         if pass_key is None:
             return err("unlock canceled or wrong passphrase")
 
+        # pythonw, not python: the GUI-subsystem interpreter is never given a
+        # console, so the agent lives entirely in its tray icon. Do not add
+        # CREATE_NO_WINDOW here -- CreateProcess documents it as mutually
+        # exclusive with DETACHED_PROCESS and fails the pair outright.
         proc = subprocess.Popen(
-            [sys.executable, str(Path(__file__).resolve()), "agent", "serve"],
+            [tray.pythonw(), str(Path(__file__).resolve()), "agent", "serve"],
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -655,6 +660,10 @@ def cmd_backup(args) -> int:
 
 def cmd_log(args) -> int:
     store.load_config()  # same reason as cmd_list: fail loudly on a wrong path
+    if args.window:
+        import logview
+
+        return logview.main()
     if not store.LOG_PATH.exists():
         print("no audit log yet")
         return 0
@@ -713,6 +722,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     lg = sub.add_parser("log", help="tail the audit trail")
     lg.add_argument("-n", "--number", type=int, default=20)
+    lg.add_argument("--window", action="store_true",
+                    help="open a live-tailing window instead of printing")
 
     return p
 
